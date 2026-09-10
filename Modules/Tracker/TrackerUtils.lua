@@ -114,11 +114,36 @@ function TrackerUtils:ShowQuestLog(quest)
     QuestLog_Update()
 end
 
+---Removes the currently tracked TomTom waypoint, if any.
+function TrackerUtils:ClearTomTomTarget()
+    if TomTom and TomTom.RemoveWaypoint and Questie.db.char._tom_waypoint then
+        TomTom:RemoveWaypoint(Questie.db.char._tom_waypoint)
+    end
+    Questie.db.char._tom_waypoint = nil
+    Questie.db.char._tom_waypoint_quest = nil
+end
+
+---Removes the tracked TomTom waypoint only if it belongs to the given quest (and, if given, objective).
+---@param questId number
+---@param objectiveIndex ObjectiveIndex?
+function TrackerUtils:ClearTomTomTargetForQuest(questId, objectiveIndex)
+    local target = Questie.db.char._tom_waypoint_quest
+    if (not target) or target.questId ~= questId then
+        return
+    end
+    if objectiveIndex and target.objectiveIndex and target.objectiveIndex ~= objectiveIndex then
+        return
+    end
+    TrackerUtils:ClearTomTomTarget()
+end
+
 ---@param title string The name of the WayPoint
 ---@param zone number The zone ID number
 ---@param x number X coordinate
 ---@param y number Y coordinate
-function TrackerUtils:SetTomTomTarget(title, zone, x, y)
+---@param questId number? The quest this waypoint belongs to, so it can be cleared automatically when the quest/objective completes
+---@param objectiveIndex ObjectiveIndex? The objective this waypoint belongs to
+function TrackerUtils:SetTomTomTarget(title, zone, x, y, questId, objectiveIndex)
     if TomTom and TomTom.AddWaypoint then
         if Questie.db.char._tom_waypoint and TomTom.RemoveWaypoint then -- remove old waypoint
             TomTom:RemoveWaypoint(Questie.db.char._tom_waypoint)
@@ -129,6 +154,12 @@ function TrackerUtils:SetTomTomTarget(title, zone, x, y)
             Questie.db.char._tom_waypoint = QuestieCompat.TomTom_AddWaypoint(title, uiMapId, x, y)
         else
             Questie.db.char._tom_waypoint = TomTom:AddWaypoint(uiMapId, x / 100, y / 100, { title = title, crazy = true, from = "Questie" })
+        end
+
+        if questId then
+            Questie.db.char._tom_waypoint_quest = { questId = questId, objectiveIndex = objectiveIndex }
+        else
+            Questie.db.char._tom_waypoint_quest = nil
         end
     end
 end

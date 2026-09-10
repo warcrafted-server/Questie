@@ -73,7 +73,7 @@ TrackerMenu.addTomTomOption = function(menu, quest, objective)
             end
 
             if spawn then
-                TrackerUtils:SetTomTomTarget(name, zone, spawn[1], spawn[2])
+                TrackerUtils:SetTomTomTarget(name, zone, spawn[1], spawn[2], quest and quest.Id, objective and objective.Index)
             elseif quest then
                 TrackerUtils:SetTomTomTargetToDungeonEntrance(quest)
             end
