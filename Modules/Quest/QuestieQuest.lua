@@ -44,6 +44,7 @@ local QuestieIconVisibility = QuestieLoader:ImportModule("QuestieIconVisibility"
 ---@type QuestieNameplate
 local QuestieNameplate = QuestieLoader:ImportModule("QuestieNameplate")
 local TrackerUtils = QuestieLoader:ImportModule("TrackerUtils")
+local AutoRoute = QuestieLoader:ImportModule("AutoRoute")
 ---@type l10n
 local l10n = QuestieLoader:ImportModule("l10n")
 ---@type QuestLogCache
@@ -1239,6 +1240,7 @@ function QuestieQuest:PopulateObjective(quest, objectiveIndex, objective, blockI
     if completed then
         _UnloadAlreadySpawnedIcons(objective)
         TrackerUtils:ClearTomTomTargetForQuest(quest.Id, objective.Index)
+        AutoRoute.Update()
         return
     end
 

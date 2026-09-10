@@ -13,6 +13,8 @@ local TrackerBaseFrame = QuestieLoader:ImportModule("TrackerBaseFrame")
 local TrackerLinePool = QuestieLoader:ImportModule("TrackerLinePool")
 ---@type TrackerQuestTimers
 local TrackerQuestTimers = QuestieLoader:ImportModule("TrackerQuestTimers")
+---@type AutoRoute
+local AutoRoute = QuestieLoader:ImportModule("AutoRoute")
 ---@type CommsVisibility
 local CommsVisibility = QuestieLoader:ImportModule("CommsVisibility")
 
@@ -649,6 +651,22 @@ function QuestieOptions.tabs.tracker:Initialize()
                                 QuestieTracker:ResetVoiceOverFrame()
                             end
                             QuestieTracker:Update()
+                        end
+                    },
+                    autoRouteEnabled = {
+                        type = "toggle",
+                        order = 11.05,
+                        width = 1.5,
+                        name = function() return l10n("Automatic |cFF54e33bTomTom|r Route") end,
+                        desc = function() return l10n("When this is checked, Questie automatically points the TomTom arrow at the next quest to do, picked by distance and quest level. Quests added to a route through the Tracker's right-click menu are visited first, in order.") end,
+                        disabled = function() return not Questie.db.profile.trackerEnabled end,
+                        hidden = function() return not IsAddOnLoaded("TomTom") end,
+                        get = function() return Questie.db.profile.autoRouteEnabled end,
+                        set = function(_, value)
+                            Questie.db.profile.autoRouteEnabled = value
+                            if value then
+                                AutoRoute.Update(true)
+                            end
                         end
                     },
                     Spacer_Dropdowns = QuestieOptionsUtils:Spacer(11.1),

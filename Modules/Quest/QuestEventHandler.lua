@@ -38,6 +38,8 @@ local QuestieTracker = QuestieLoader:ImportModule("QuestieTracker")
 local QuestgiverFrame = QuestieLoader:ImportModule("QuestgiverFrame")
 ---@type TrackerUtils
 local TrackerUtils = QuestieLoader:ImportModule("TrackerUtils")
+---@type AutoRoute
+local AutoRoute = QuestieLoader:ImportModule("AutoRoute")
 ---@type l10n
 local l10n = QuestieLoader:ImportModule("l10n")
 ---@type QuestiePartyObjectives
@@ -333,6 +335,7 @@ function _QuestEventHandler:QuestTurnedIn(questId, xpReward, moneyReward)
     Questie.Debug(Questie.DEBUG_INFO, "Quest:", questId, "was turned in and is completed")
 
     TrackerUtils:ClearTomTomTargetForQuest(questId)
+    AutoRoute.RemoveFromRoute(questId)
 
     if questLog[questId] then
         -- There are quests which you just turn in so there is no preceding QUEST_ACCEPTED event and questLog[questId]
@@ -400,6 +403,7 @@ function _QuestEventHandler:MarkQuestAsAbandoned(questId)
         Questie.Debug(Questie.DEBUG_INFO, "Quest:", questId, "was abandoned")
 
         TrackerUtils:ClearTomTomTargetForQuest(questId)
+        AutoRoute.RemoveFromRoute(questId)
 
         QuestLogCache.RemoveQuest(questId)
         QuestieQuest:SetObjectivesDirty(questId) -- is this necessary? should whole quest.Objectives be cleared at some point of quest removal?
@@ -542,6 +546,12 @@ end
 function _QuestEventHandler:ZoneChangedNewArea()
     Questie.Debug(Questie.DEBUG_DEVELOP, "[EVENT] ZONE_CHANGED_NEW_AREA")
     QuestieTracker.HandleZoneChanged()
+
+    -- Player coordinates are not settled the instant the event fires, and the route
+    -- target is picked by distance, so give the world a moment before re-picking.
+    C_Timer.After(2, function()
+        AutoRoute.Update()
+    end)
 end
 
 function _QuestEventHandler:BagUpdate()
