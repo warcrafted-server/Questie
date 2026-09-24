@@ -148,6 +148,7 @@ function QuestieOptions.tabs.tracker:Initialize()
                             end
 
                             QuestieTracker:Update()
+                            AutoRoute.ScheduleUpdate()
                         end
                     },
                     showQuestLevels = {
@@ -658,15 +659,12 @@ function QuestieOptions.tabs.tracker:Initialize()
                         order = 11.05,
                         width = 1.5,
                         name = function() return l10n("Automatic |cFF54e33bTomTom|r Route") end,
-                        desc = function() return l10n("When this is checked, Questie automatically points the TomTom arrow at the next quest to do, picked by distance and quest level. Quests added to a route through the Tracker's right-click menu are visited first, in order.") end,
+                        desc = function() return l10n("Automatically point TomTom at the next tracked quest. Quests added to an ordered route from the Tracker are visited first; otherwise Questie uses distance and quest level. Manually set Questie waypoints take priority.") end,
                         disabled = function() return not Questie.db.profile.trackerEnabled end,
                         hidden = function() return not IsAddOnLoaded("TomTom") end,
                         get = function() return Questie.db.profile.autoRouteEnabled end,
                         set = function(_, value)
-                            Questie.db.profile.autoRouteEnabled = value
-                            if value then
-                                AutoRoute.Update(true)
-                            end
+                            AutoRoute.SetEnabled(value)
                         end
                     },
                     Spacer_Dropdowns = QuestieOptionsUtils:Spacer(11.1),

@@ -7,31 +7,127 @@ local TrackerUtils = QuestieLoader:ImportModule("TrackerUtils")
 local QuestieMap = QuestieLoader:ImportModule("QuestieMap")
 ---@type QuestiePlayer
 local QuestiePlayer = QuestieLoader:ImportModule("QuestiePlayer")
+---@type QuestieQuest
+local QuestieQuest = QuestieLoader:ImportModule("QuestieQuest")
 ---@type QuestieLib
 local QuestieLib = QuestieLoader:ImportModule("QuestieLib")
+---@type ZoneDB
+local ZoneDB = QuestieLoader:ImportModule("ZoneDB")
 
+local C_Timer = QuestieCompat.C_Timer
 local tinsert, tremove = table.insert, table.remove
 
--- Quests this far above the player's level are treated as unreachable rather than
--- merely expensive, so they never win on proximity alone.
 local LEVEL_ABOVE_CUTOFF = 5
-
--- Yard cost added per level of mismatch. Roughly "one level of difference is worth
--- walking this much further", which is what keeps a grey quest next door from
--- outranking an on-level quest one zone over.
 local YARDS_PER_LEVEL_ABOVE = 900
 local YARDS_PER_LEVEL_BELOW = 220
-
 local UNREACHABLE = math.huge
 
----@return QuestId[]
+local updateGeneration = 0
+local lastAutoTarget
+
 local function _GetRoute()
-    return Questie.db.char.autoRouteOrder or {}
+    if not Questie.db.char.autoRouteOrder then
+        Questie.db.char.autoRouteOrder = {}
+    end
+    return Questie.db.char.autoRouteOrder
 end
 
----Returns the route position of a quest, or nil when it is not part of the route.
----@param questId QuestId
----@return number?
+local function _GetDungeonEntrance(quest)
+    local locations = quest.zoneOrSort and ZoneDB:GetDungeonLocation(quest.zoneOrSort)
+    local entrance = locations and locations[1]
+    if entrance and entrance[1] and entrance[2] and entrance[3] then
+        return {
+            questId = quest.Id,
+            zone = entrance[1],
+            x = entrance[2],
+            y = entrance[3],
+            name = ZoneDB:GetLocalizedDungeonName(quest.zoneOrSort) or quest.name,
+        }
+    end
+end
+
+local function _GetTarget(quest, useDungeonEntrance)
+    -- An ordered dungeon quest should lead to the entrance while outside the instance.
+    local needsDungeonEntrance = useDungeonEntrance and quest:IsComplete() ~= 1
+    if needsDungeonEntrance and not IsInInstance() then
+        local entrance = _GetDungeonEntrance(quest)
+        if entrance then
+            return entrance
+        end
+    end
+
+    local spawn, zone, name, _, _, distance = QuestieMap:GetNearestQuestSpawn(quest)
+    if spawn and zone and spawn[1] and spawn[2] then
+        return {
+            questId = quest.Id,
+            zone = zone,
+            x = spawn[1],
+            y = spawn[2],
+            name = name or quest.name,
+            distance = distance,
+        }
+    end
+
+    if needsDungeonEntrance then
+        return _GetDungeonEntrance(quest)
+    end
+end
+
+local function _ScoreQuest(questId, distance)
+    local playerLevel = QuestiePlayer.GetPlayerLevel()
+    if type(playerLevel) ~= "number" then
+        return distance
+    end
+    local questLevel = QuestieLib.GetEffectiveQuestLevel(questId, playerLevel)
+    if type(questLevel) ~= "number" or questLevel == 0 then
+        return distance
+    end
+
+    local difference = questLevel - playerLevel
+    if difference > LEVEL_ABOVE_CUTOFF then
+        return UNREACHABLE
+    elseif difference > 0 then
+        return distance + difference * YARDS_PER_LEVEL_ABOVE
+    end
+    return distance - difference * YARDS_PER_LEVEL_BELOW
+end
+
+local function _PickNextTarget()
+    local questLog = QuestiePlayer.currentQuestlog or {}
+
+    for _, questId in ipairs(_GetRoute()) do
+        local quest = questLog[questId]
+        if quest and QuestieQuest:IsQuestTracked(questId) then
+            local target = _GetTarget(quest, true)
+            if target then
+                return target
+            end
+        end
+    end
+
+    local bestTarget, bestScore = nil, UNREACHABLE
+    for questId, quest in pairs(questLog) do
+        if QuestieQuest:IsQuestTracked(questId) then
+            local target = _GetTarget(quest, false)
+            if target and type(target.distance) == "number" then
+                local score = _ScoreQuest(questId, target.distance)
+                if score < bestScore or (score == bestScore and bestTarget and questId < bestTarget.questId) then
+                    bestTarget, bestScore = target, score
+                end
+            end
+        end
+    end
+    return bestTarget
+end
+
+local function _IsSameTarget(left, right)
+    return left and right
+        and left.questId == right.questId
+        and left.zone == right.zone
+        and left.x == right.x
+        and left.y == right.y
+end
+
 function AutoRoute.GetRoutePosition(questId)
     for position, routeQuestId in ipairs(_GetRoute()) do
         if routeQuestId == questId then
@@ -40,150 +136,122 @@ function AutoRoute.GetRoutePosition(questId)
     end
 end
 
----@param questId QuestId
----@return boolean
-function AutoRoute.IsInRoute(questId)
-    return AutoRoute.GetRoutePosition(questId) ~= nil
-end
-
----Appends a quest to the end of the route.
----@param questId QuestId
 function AutoRoute.AddToRoute(questId)
-    if AutoRoute.IsInRoute(questId) then
+    if AutoRoute.GetRoutePosition(questId) then
         return
     end
-
-    local route = _GetRoute()
-    tinsert(route, questId)
-    Questie.db.char.autoRouteOrder = route
-
-    AutoRoute.Update(true)
+    tinsert(_GetRoute(), questId)
+    AutoRoute.ScheduleUpdate()
 end
 
----@param questId QuestId
 function AutoRoute.RemoveFromRoute(questId)
-    local route = _GetRoute()
     local position = AutoRoute.GetRoutePosition(questId)
-    if not position then
-        return
+    if position then
+        tremove(_GetRoute(), position)
     end
-
-    tremove(route, position)
-    Questie.db.char.autoRouteOrder = route
-
-    AutoRoute.Update(true)
+    -- A quest outside the ordered route can still be the automatic target.
+    AutoRoute.ScheduleUpdate()
 end
 
----Moves a quest one step towards the front (delta -1) or back (delta 1) of the route.
----@param questId QuestId
----@param delta number
 function AutoRoute.MoveInRoute(questId, delta)
     local route = _GetRoute()
     local position = AutoRoute.GetRoutePosition(questId)
-    if not position then
+    local target = position and position + delta
+    if not target or target < 1 or target > #route then
         return
     end
-
-    local target = position + delta
-    if target < 1 or target > #route then
-        return
-    end
-
     route[position], route[target] = route[target], route[position]
-    Questie.db.char.autoRouteOrder = route
-
-    AutoRoute.Update(true)
+    AutoRoute.ScheduleUpdate()
 end
 
 function AutoRoute.ClearRoute()
     Questie.db.char.autoRouteOrder = {}
-    AutoRoute.Update(true)
+    AutoRoute.ScheduleUpdate()
 end
 
----Level-weighted travel cost for a quest, in yards. Lower is better.
----@param questId QuestId
----@param distance number
----@return number
-local function _ScoreQuest(questId, distance)
-    local playerLevel = QuestiePlayer.GetPlayerLevel()
-    -- Resolves the -1 "scales to player" level, so those quests score as on-level.
-    local questLevel = QuestieLib.GetEffectiveQuestLevel(questId, playerLevel)
-    if not questLevel or questLevel == 0 then
-        return distance
-    end
-
-    local difference = questLevel - playerLevel
-
-    if difference > LEVEL_ABOVE_CUTOFF then
-        return UNREACHABLE
-    end
-
-    if difference > 0 then
-        return distance + difference * YARDS_PER_LEVEL_ABOVE
-    end
-
-    return distance - difference * YARDS_PER_LEVEL_BELOW
-end
-
----Picks the quest the player should head to next, preferring the manual route.
----@return Quest? quest
----@return table? spawn
----@return AreaId? zone
----@return string? name
-local function _PickNextQuest()
+function AutoRoute.PruneRoute()
     local questLog = QuestiePlayer.currentQuestlog or {}
-
-    for _, questId in ipairs(_GetRoute()) do
-        local quest = questLog[questId]
-        if quest then
-            local spawn, zone, name = QuestieMap:GetNearestQuestSpawn(quest)
-            if spawn then
-                return quest, spawn, zone, name
-            end
+    local route = _GetRoute()
+    for position = #route, 1, -1 do
+        if not questLog[route[position]] then
+            tremove(route, position)
         end
     end
-
-    local bestQuest, bestSpawn, bestZone, bestName
-    local bestScore = UNREACHABLE
-
-    for questId, quest in pairs(questLog) do
-        if not Questie.db.char.AutoUntrackedQuests[questId] then
-            local spawn, zone, name, _, _, distance = QuestieMap:GetNearestQuestSpawn(quest)
-            if spawn then
-                local score = _ScoreQuest(questId, distance)
-                if score < bestScore then
-                    bestScore = score
-                    bestQuest = quest
-                    bestSpawn = spawn
-                    bestZone = zone
-                    bestName = name
-                end
-            end
-        end
-    end
-
-    return bestQuest, bestSpawn, bestZone, bestName
 end
 
----Re-picks the auto-route target and moves the TomTom arrow to it.
----@param force boolean? @Retarget even when the current target is still valid.
-function AutoRoute.Update(force)
+function AutoRoute.RestoreSavedWaypoint()
+    -- TomTom reassigns numeric waypoint IDs on login.
+    if Questie.db.char._tom_waypoint_source == "autoRoute" then
+        TrackerUtils:ForgetTomTomTarget()
+    elseif Questie.db.char._tom_waypoint and not TrackerUtils:GetTomTomTarget() then
+        TrackerUtils:ForgetTomTomTarget()
+    end
+    lastAutoTarget = nil
+end
+
+function AutoRoute.ClearAutomaticTarget()
+    if Questie.db.char._tom_waypoint_source == "autoRoute" then
+        TrackerUtils:ClearTomTomTarget()
+    end
+    lastAutoTarget = nil
+end
+
+function AutoRoute.Update()
+    if not Questie.started or not Questie.db.profile.autoRouteEnabled or not TomTom or not TomTom.AddWaypoint then
+        return
+    end
+    if not Questie.db.profile.trackerEnabled then
+        AutoRoute.ClearAutomaticTarget()
+        return
+    end
+
+    -- A waypoint set by a player, including one without a quest ID, takes priority.
+    local waypoint = TrackerUtils:GetTomTomTarget()
+    if Questie.db.char._tom_waypoint and not waypoint then
+        TrackerUtils:ForgetTomTomTarget()
+        lastAutoTarget = nil
+        waypoint = nil
+    end
+    if waypoint and Questie.db.char._tom_waypoint_source ~= "autoRoute" then
+        return
+    end
+
+    local target = _PickNextTarget()
+    if not target then
+        AutoRoute.ClearAutomaticTarget()
+        return
+    end
+    if waypoint and Questie.db.char._tom_waypoint_source == "autoRoute" and _IsSameTarget(lastAutoTarget, target) then
+        return
+    end
+
+    TrackerUtils:SetTomTomTarget(target.name, target.zone, target.x, target.y, target.questId, nil, "autoRoute")
+    if Questie.db.char._tom_waypoint_source == "autoRoute" then
+        lastAutoTarget = target
+    else
+        lastAutoTarget = nil
+    end
+end
+
+function AutoRoute.ScheduleUpdate(delay)
     if not Questie.db.profile.autoRouteEnabled then
         return
     end
+    updateGeneration = updateGeneration + 1
+    local generation = updateGeneration
+    C_Timer.After(delay or 0.15, function()
+        if generation == updateGeneration then
+            AutoRoute.Update()
+        end
+    end)
+end
 
-    local quest, spawn, zone, name = _PickNextQuest()
-    if (not quest) or (not spawn) or (not zone) then
-        return
+function AutoRoute.SetEnabled(enabled)
+    Questie.db.profile.autoRouteEnabled = enabled
+    updateGeneration = updateGeneration + 1
+    if enabled then
+        AutoRoute.ScheduleUpdate(0)
+    else
+        AutoRoute.ClearAutomaticTarget()
     end
-
-    -- A waypoint the player set by hand outranks the automatic pick until the quest it
-    -- points at is gone (completed, turned in or abandoned), which clears it elsewhere.
-    local current = Questie.db.char._tom_waypoint_quest
-    if (not force) and current and QuestiePlayer.currentQuestlog[current.questId] then
-        return
-    end
-
-    Questie.Debug(Questie.DEBUG_DEVELOP, "[AutoRoute] Targeting quest", quest.Id, name)
-    TrackerUtils:SetTomTomTarget(name, zone, spawn[1], spawn[2], quest.Id)
 end

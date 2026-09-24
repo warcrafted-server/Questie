@@ -15,6 +15,7 @@ local QuestieQuest = QuestieLoader:ImportModule("QuestieQuest")
 local QuestieIconVisibility = QuestieLoader:ImportModule("QuestieIconVisibility")
 ---@type QuestieLib
 local QuestieLib = QuestieLoader:ImportModule("QuestieLib")
+---@type TrackerUtils
 local TrackerUtils = QuestieLoader:ImportModule("TrackerUtils")
 
 --- COMPATIBILITY ---
@@ -228,16 +229,16 @@ function _QuestieFrame:OnClick(button)
         local title = self.data.Name
         local add = true
 
-        -- Toggle off if clicking the same waypoint again (non-3.3.5 TomTom only)
-        if (not QuestieCompat.Is335) and Questie.db.char._tom_waypoint then
+        -- The newer TomTom waypoint handle supports toggling the same icon off.
+        if (not QuestieCompat.Is335) and Questie.db.char._tom_waypoint and TomTom.RemoveWaypoint then
             local waypoint = Questie.db.char._tom_waypoint
             add = waypoint[1] ~= m or waypoint[2] ~= x or waypoint[3] ~= y or waypoint.title ~= title or waypoint.from ~= "Questie"
         end
 
         if add then
-            local questId = self.data.ObjectiveData and self.data.Id
+            local questId = self.data.QuestData and self.data.Id
             local objectiveIndex = self.data.ObjectiveData and self.data.ObjectiveData.Index
-            TrackerUtils:SetTomTomTarget(title, self.data.AreaID, self.x, self.y, questId, objectiveIndex)
+            TrackerUtils:SetTomTomTarget(title, self.AreaID, self.x, self.y, questId, objectiveIndex)
         else
             TrackerUtils:ClearTomTomTarget()
         end

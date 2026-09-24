@@ -70,12 +70,15 @@ TrackerMenu.addTomTomOption = function(menu, quest, objective)
             LibDropDown:CloseDropDownMenus()
 
             local spawn, zone, name = QuestieMap:GetNearestQuestSpawn(quest)
+            local targetObjectiveIndex
             if (not spawn) and objective ~= nil then
                 spawn, zone, name = QuestieMap:GetNearestSpawn(objective)
+                targetObjectiveIndex = objective.Index
             end
 
             if spawn then
-                TrackerUtils:SetTomTomTarget(name, zone, spawn[1], spawn[2], quest and quest.Id, objective and objective.Index)
+                local questId = quest and quest.Id or objective and objective.questId
+                TrackerUtils:SetTomTomTarget(name, zone, spawn[1], spawn[2], questId, targetObjectiveIndex)
             elseif quest then
                 TrackerUtils:SetTomTomTargetToDungeonEntrance(quest)
             end
@@ -281,58 +284,53 @@ end
 
 TrackerMenu.addRouteOption = function(menu, quest)
     local position = AutoRoute.GetRoutePosition(quest.Id)
-
     if not position then
         tinsert(menu, {
-            text = l10n('Add to Route'),
+            text = l10n("Add to |cFF54e33bTomTom|r Route"),
             func = function()
                 LibDropDown:CloseDropDownMenus()
                 AutoRoute.AddToRoute(quest.Id)
-            end
+            end,
         })
         return
     end
 
-    local routeMenu = {}
-
-    tinsert(routeMenu, {
-        text = l10n('Move Up'),
-        disabled = position == 1,
-        func = function()
-            LibDropDown:CloseDropDownMenus()
-            AutoRoute.MoveInRoute(quest.Id, -1)
-        end
-    })
-
-    tinsert(routeMenu, {
-        text = l10n('Move Down'),
-        disabled = position == #(Questie.db.char.autoRouteOrder or {}),
-        func = function()
-            LibDropDown:CloseDropDownMenus()
-            AutoRoute.MoveInRoute(quest.Id, 1)
-        end
-    })
-
-    tinsert(routeMenu, {
-        text = l10n('Remove from Route'),
-        func = function()
-            LibDropDown:CloseDropDownMenus()
-            AutoRoute.RemoveFromRoute(quest.Id)
-        end
-    })
-
-    tinsert(routeMenu, {
-        text = l10n('Clear Route'),
-        func = function()
-            LibDropDown:CloseDropDownMenus()
-            AutoRoute.ClearRoute()
-        end
-    })
-
+    local routeMenu = {
+        {
+            text = l10n("Move Up"),
+            disabled = position == 1,
+            func = function()
+                LibDropDown:CloseDropDownMenus()
+                AutoRoute.MoveInRoute(quest.Id, -1)
+            end,
+        },
+        {
+            text = l10n("Move Down"),
+            disabled = position == #(Questie.db.char.autoRouteOrder or {}),
+            func = function()
+                LibDropDown:CloseDropDownMenus()
+                AutoRoute.MoveInRoute(quest.Id, 1)
+            end,
+        },
+        {
+            text = l10n("Remove from Route"),
+            func = function()
+                LibDropDown:CloseDropDownMenus()
+                AutoRoute.RemoveFromRoute(quest.Id)
+            end,
+        },
+        {
+            text = l10n("Clear Route"),
+            func = function()
+                LibDropDown:CloseDropDownMenus()
+                AutoRoute.ClearRoute()
+            end,
+        },
+    }
     tinsert(menu, {
-        text = l10n('Route') .. " |cFFAAAAAA(#" .. position .. ")|r",
+        text = l10n("|cFF54e33bTomTom|r Route") .. " |cFFAAAAAA(#" .. position .. ")|r",
         hasArrow = true,
-        menuList = routeMenu
+        menuList = routeMenu,
     })
 end
 
@@ -473,7 +471,9 @@ function TrackerMenu:GetMenuForQuest(quest)
     TrackerMenu.addObjectiveOption(menu, subMenu, quest)
     TrackerMenu.addFocusUnfocusOption(menu, quest)
     TrackerMenu.addTomTomOption(menu, quest, nil)
-    TrackerMenu.addRouteOption(menu, quest)
+    if IsAddOnLoaded("TomTom") then
+        TrackerMenu.addRouteOption(menu, quest)
+    end
     TrackerMenu.minMaxQuestOption(menu, quest)
     TrackerMenu.addShowHideQuestsOption(menu, quest)
     TrackerMenu.addShowFinisherOnMapOption(menu, quest)

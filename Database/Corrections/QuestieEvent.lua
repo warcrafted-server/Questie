@@ -118,6 +118,7 @@ local CALENDAR_EVENT_NAME_ALIASES = {
     ["Darkmoon Faire"] = "Darkmoon Faire",
     ["Day of the Dead"] = "Day of the Dead",
     ["Feast of Winter Veil"] = "Winter Veil",
+    ["Fireworks Spectacular"] = "Fireworks Spectacular",
     ["Harvest Festival"] = "Harvest Festival",
     ["Hallow's End"] = "Hallow's End",
     ["Kalu'ak Fishing Derby"] = "Kalu'ak Fishing Derby",
@@ -127,6 +128,7 @@ local CALENDAR_EVENT_NAME_ALIASES = {
     ["Midsummer Fire Festival"] = "Midsummer",
     ["Noblegarden"] = "Noblegarden",
     ["Pilgrim's Bounty"] = "Pilgrim's Bounty",
+    ["Pirates' Day"] = "Pirates' Day",
     ["Stranglethorn Fishing Extravaganza"] = "Stranglethorn Fishing Extravaganza",
     ["Winter Veil"] = "Winter Veil",
 }
@@ -367,7 +369,7 @@ _AnnounceActiveEvent = function(eventName)
     _QuestieEvent.announcedEvents[eventName] = true
     if not _ShouldAnnounceWorldEvents() then return end
 
-    print(Questie:Colorize("[Questie]", "yellow"), "|cFF6ce314" .. l10n("The '%s' world event is active!", l10n(eventName)))
+    print(Questie:Colorize("[Questie]", "yellow"), "|cFF6ce314" .. l10n("The \"%s\" world event is active!", l10n(eventName)))
 end
 
 _SetTimedEventQuestState = function(eventName, isActive)
@@ -462,9 +464,9 @@ _AnnounceUpcomingTimedEvent = function(eventName, currentDate)
     if _ShouldAnnounceWorldEvents() then
         local hoursUntilStart = math.ceil(delay / 3600)
         if hoursUntilStart > 1 then
-            print(Questie:Colorize("[Questie]", "yellow"), "|cFF6ce314" .. l10n("The '%s' world event starts in about %d hours.", l10n(eventName), hoursUntilStart))
+            print(Questie:Colorize("[Questie]", "yellow"), "|cFF6ce314" .. l10n("The \"%s\" world event starts in about %d hours.", l10n(eventName), hoursUntilStart))
         else
-            print(Questie:Colorize("[Questie]", "yellow"), "|cFF6ce314" .. l10n("The '%s' world event starts in less than an hour.", l10n(eventName)))
+            print(Questie:Colorize("[Questie]", "yellow"), "|cFF6ce314" .. l10n("The \"%s\" world event starts in less than an hour.", l10n(eventName)))
         end
     end
 
@@ -553,13 +555,7 @@ function QuestieEvent.Initialize()
         end
 
         local isFinalAttempt = _QuestieEvent.initializeAttempts >= EVENT_INIT_MAX_ATTEMPTS
-        local sawCalendarEvent = QuestieEvent:Load(isFinalAttempt)
-
-        if sawCalendarEvent then
-            QuestieEvent.eventQuests = nil
-            _CancelInitializeTimer()
-            return true
-        end
+        QuestieEvent:Load(isFinalAttempt)
 
         if isFinalAttempt then
             _CancelInitializeTimer()
@@ -587,17 +583,15 @@ end
 
 function QuestieEvent:Load(isFinalPass)
     if not QuestieEvent.eventQuests then
-        return false
+        return
     end
 
     local year = date("%y")
-    local sawCalendarEvent = false
     local addedActiveQuest = false
 
     -- We want to replace the Lunar Festival date with the date that we estimate
     QuestieEvent.eventDates["Lunar Festival"] = QuestieEvent.lunarFestival[year]
     local activeEvents, darkmoonLocation, calendarAvailable = _GetActiveCalendarEvents()
-    sawCalendarEvent = next(activeEvents) ~= nil
 
     local eventCorrections
     if Questie.IsTBC then
@@ -707,8 +701,6 @@ function QuestieEvent:Load(isFinalPass)
     if addedActiveQuest then
         _RefreshAvailableQuests()
     end
-
-    return sawCalendarEvent
 end
 
 --- Date-based fallback for servers without a location-specific Darkmoon calendar texture.
@@ -881,7 +873,7 @@ _LoadDarkmoonFaire = function(eventLocation)
         _QuestieEvent.announcedEvents["Darkmoon Faire"] = true
 
         if _ShouldAnnounceWorldEvents() then
-            print(Questie:Colorize("[Questie]", "yellow"), "|cFF6ce314" .. l10n("The '%s' world event is active!", _GetDarkmoonFaireEventName(eventLocation)))
+            print(Questie:Colorize("[Questie]", "yellow"), "|cFF6ce314" .. l10n("The \"%s\" world event is active!", _GetDarkmoonFaireEventName(eventLocation)))
         end
     end
 

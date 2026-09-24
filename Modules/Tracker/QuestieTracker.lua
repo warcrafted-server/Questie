@@ -17,6 +17,8 @@ local TrackerFadeTicker = QuestieLoader:ImportModule("TrackerFadeTicker")
 local TrackerQuestTimers = QuestieLoader:ImportModule("TrackerQuestTimers")
 ---@type TrackerUtils
 local TrackerUtils = QuestieLoader:ImportModule("TrackerUtils")
+---@type AutoRoute
+local AutoRoute = QuestieLoader:ImportModule("AutoRoute")
 -------------------------
 --Import Questie modules.
 -------------------------
@@ -90,6 +92,123 @@ local hiddenByInstance = false
 local minimizedByCombat = false
 local hiddenByCombat = false
 
+local nearestQuestItemButton
+
+---@param quest Quest
+---@return ItemId|nil
+local function _GetUsableClickQuestItemId(quest)
+    if not quest then
+        return nil
+    end
+
+    local items = TrackerUtils:GetUsableQuestItemIds(quest)
+    if quest:IsComplete() == 1 then
+        local isComplete = (quest.isComplete ~= true and #quest.Objectives == 0) or quest.isComplete == true
+        local primaryItem = items[1]
+        if not isComplete or not primaryItem or not GetItemSpell(primaryItem) then
+            return nil
+        end
+
+        local sourceItemId = quest.sourceItemId
+        if sourceItemId == nil then
+            sourceItemId = QuestieDB.QueryQuestSingle(quest.Id, "sourceItemId")
+        end
+        if primaryItem == sourceItemId then
+            return primaryItem
+        end
+        for _, itemId in pairs(quest.requiredSourceItems or {}) do
+            if itemId == primaryItem then
+                return primaryItem
+            end
+        end
+        return nil
+    end
+
+    for _, itemId in ipairs(items) do
+        -- The keybind is specifically for USING an item.
+        if GetItemSpell(itemId) then
+            return itemId
+        end
+    end
+
+    return nil
+end
+
+---@return ItemId|nil
+local function _GetNearestQuestItemId()
+    -- Prefer the quest Questie is currently routing to.
+    -- This covers both manually selected Questie/TomTom targets and AutoRoute,
+    -- because both store quest ownership in _tom_waypoint_quest.
+    local waypointQuest = TrackerUtils:GetTomTomTarget() and Questie.db.char._tom_waypoint_quest
+
+    if waypointQuest and waypointQuest.questId then
+        local quest = QuestiePlayer.currentQuestlog[waypointQuest.questId]
+        local itemId = _GetUsableClickQuestItemId(quest)
+
+        if itemId then
+            return itemId
+        end
+    end
+
+    -- Otherwise fall back to the nearest tracked quest that has a usable item.
+    local bestItemId
+    local bestDistance
+    local bestQuestId
+
+    for questId, quest in pairs(QuestiePlayer.currentQuestlog or {}) do
+        if quest and QuestieQuest:IsQuestTracked(questId) then
+            local itemId = _GetUsableClickQuestItemId(quest)
+
+            if itemId then
+                local _, _, _, _, _, distance = QuestieMap:GetNearestQuestSpawn(quest)
+
+                if type(distance) == "number" and ((not bestDistance) or distance < bestDistance or (distance == bestDistance and questId < bestQuestId)) then
+                    bestItemId = itemId
+                    bestDistance = distance
+                    bestQuestId = questId
+                end
+            end
+        end
+    end
+
+    return bestItemId
+end
+
+local function _UpdateNearestQuestItemButton()
+    if not nearestQuestItemButton or InCombatLockdown() then
+        return
+    end
+
+    local itemId = _GetNearestQuestItemId()
+
+    -- Secure attributes cannot be changed in combat, so only update them here.
+    -- Also avoid rewriting the same secure attribute unnecessarily.
+    if nearestQuestItemButton.questieItemId == itemId then
+        return
+    end
+
+    nearestQuestItemButton.questieItemId = itemId
+    nearestQuestItemButton:SetAttribute("item", itemId and ("item:" .. itemId) or nil)
+end
+
+local function _InitializeNearestQuestItemButton()
+    if nearestQuestItemButton then
+        return
+    end
+
+    nearestQuestItemButton = CreateFrame("Button", "Questie_NearestQuestItemButton", UIParent, "SecureActionButtonTemplate")
+
+    nearestQuestItemButton:SetAttribute("type", "item")
+    nearestQuestItemButton:RegisterForClicks("AnyDown")
+    nearestQuestItemButton:Hide()
+
+    _UpdateNearestQuestItemButton()
+
+    -- Re-evaluate periodically because proximity can change simply by moving.
+    -- During combat the existing secure selection remains untouched.
+    C_Timer.NewTicker(5, _UpdateNearestQuestItemButton)
+end
+
 function QuestieTracker.Initialize()
     assert(coroutine.running(), "QuestieTracker.Initialize must be called from a coroutine")
 
@@ -100,6 +219,7 @@ function QuestieTracker.Initialize()
 
     -- Register the keybinding label even when the tracker starts disabled.
     QuestieTracker.SetupKeybinding()
+    _InitializeNearestQuestItemButton()
 
     if (not Questie.db.profile.trackerEnabled) then
         -- The Tracker is disabled, no need to continue
@@ -500,6 +620,7 @@ function QuestieTracker:Toggle()
         Questie.db.profile.trackerEnabled = true
     end
     QuestieTracker:Update()
+    AutoRoute.ScheduleUpdate()
 end
 
 -- Minimizes the QuestieTracker
@@ -703,6 +824,7 @@ end
 
 function QuestieTracker.SetupKeybinding()
     _G.BINDING_NAME_QUESTIE_TOGGLE_TRACKER = l10n("Toggle Questie Tracker")
+    _G["BINDING_NAME_CLICK Questie_NearestQuestItemButton:LeftButton"] = l10n("Use Nearest Quest Item")
 end
 
 local function _UpdateLineWidth(line, objectiveMarginLeft)
@@ -2374,6 +2496,7 @@ function QuestieTracker:UntrackQuestId(questId)
     else
         Questie.db.char.AutoUntrackedQuests[questId] = true
     end
+    AutoRoute.ScheduleUpdate()
 
     CommsVisibility:ScheduleSnapshot("UNTRACK_QUEST")
 
@@ -2441,6 +2564,7 @@ function QuestieTracker:AQW_Insert(index, expire)
         end
 
         CommsVisibility:ScheduleSnapshot("TRACK_QUEST")
+        AutoRoute.ScheduleUpdate()
 
         local quest = QuestieDB.GetQuest(questId)
 
@@ -2533,10 +2657,15 @@ function QuestieTracker:TrackAchieve(achieveId)
         return
     end
 
-    -- If an achievement is already tracked in the Achievement UI then untrack it (Mimicks a Toggle effect).
+    -- Questie removes achievements from Blizzard's tracker, so another click in the
+    -- Achievement UI comes back through AddTrackedAchievement and needs to toggle off.
     if Questie.db.char.trackedAchievementIds[achieveId] then
-        QuestieTracker:UntrackAchieveId(achieveId)
         RemoveTrackedAchievement(achieveId, true)
+
+        if AchievementFrame and AchievementFrame:IsShown() then
+            QuestieTracker:UntrackAchieveId(achieveId)
+        end
+
         return
     end
 
@@ -2567,8 +2696,12 @@ function QuestieTracker:TrackAchieve(achieveId)
 
         -- Krowi isn't using this check box for their Achievement frame
         if not IsAddOnLoaded("Krowi_AchievementFilter") then
-            mouseFocus = GetMouseFocus():GetName()
-            frameMatch = strmatch(mouseFocus, "(AchievementFrameAchievementsContainerButton%dTracked.*)")
+            local mouseFocusFrame = GetMouseFocus()
+            mouseFocus = mouseFocusFrame and mouseFocusFrame:GetName()
+
+            if mouseFocus then
+                frameMatch = strmatch(mouseFocus, "(AchievementFrameAchievementsContainerButton%dTracked.*)")
+            end
         end
 
         -- Upon first login or reloadui, this frame isn't loaded
@@ -2576,9 +2709,12 @@ function QuestieTracker:TrackAchieve(achieveId)
             AchievementFrame_LoadUI()
         end
 
-        -- This check makes sure the only way to track an achieve is through the Blizzard Achievement UI
+        -- Allow achievements to be tracked through the Blizzard Achievement UI
+        -- or programmatically through AddTrackedAchievement.
         if Questie.db.char.trackedAchievementIds[achieveId] then
             Questie.db.char.trackedAchievementIds[achieveId] = nil
+        elseif not AchievementFrame:IsShown() then
+            Questie.db.char.trackedAchievementIds[achieveId] = true
         elseif IsShiftKeyDown() and AchievementFrame:IsShown() then
             Questie.db.char.trackedAchievementIds[achieveId] = true
         elseif AchievementFrame:IsShown() and (mouseFocus == frameMatch) then

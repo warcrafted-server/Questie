@@ -258,6 +258,8 @@ function _QuestEventHandler:QuestAccepted(questLogIndex, questId)
     questId = questId or select(8, GetQuestLogTitle(questLogIndex))
     Questie.Debug(Questie.DEBUG_DEVELOP, "[Quest Event] QUEST_ACCEPTED", questLogIndex, questId)
 
+    TrackerUtils:ClearTomTomTargetForQuest(questId)
+
     if questLog[questId] and questLog[questId].timer then
         -- We had a QUEST_REMOVED event which started this timer and now it was accepted again.
         -- So the quest was abandoned before, because QUEST_TURNED_IN would have run before QUEST_ACCEPTED.
@@ -335,7 +337,6 @@ function _QuestEventHandler:QuestTurnedIn(questId, xpReward, moneyReward)
     Questie.Debug(Questie.DEBUG_INFO, "Quest:", questId, "was turned in and is completed")
 
     TrackerUtils:ClearTomTomTargetForQuest(questId)
-    AutoRoute.RemoveFromRoute(questId)
 
     if questLog[questId] then
         -- There are quests which you just turn in so there is no preceding QUEST_ACCEPTED event and questLog[questId]
@@ -349,6 +350,7 @@ function _QuestEventHandler:QuestTurnedIn(questId, xpReward, moneyReward)
     QuestieQuest:SetObjectivesDirty(questId) -- is this necessary? should whole quest.Objectives be cleared at some point of quest removal?
 
     QuestLifecycle:CompleteQuest(questId)
+    AutoRoute.RemoveFromRoute(questId)
     QuestieJourney:CompleteQuest(questId)
     QuestieAnnounce:CompletedQuest(questId)
 
@@ -403,12 +405,12 @@ function _QuestEventHandler:MarkQuestAsAbandoned(questId)
         Questie.Debug(Questie.DEBUG_INFO, "Quest:", questId, "was abandoned")
 
         TrackerUtils:ClearTomTomTargetForQuest(questId)
-        AutoRoute.RemoveFromRoute(questId)
 
         QuestLogCache.RemoveQuest(questId)
         QuestieQuest:SetObjectivesDirty(questId) -- is this necessary? should whole quest.Objectives be cleared at some point of quest removal?
 
         QuestLifecycle:AbandonQuest(questId)
+        AutoRoute.RemoveFromRoute(questId)
         AvailableQuests.ResetLastNpcGuid()
         QuestieJourney:AbandonQuest(questId)
         QuestieAnnounce:AbandonedQuest(questId)
@@ -546,12 +548,9 @@ end
 function _QuestEventHandler:ZoneChangedNewArea()
     Questie.Debug(Questie.DEBUG_DEVELOP, "[EVENT] ZONE_CHANGED_NEW_AREA")
     QuestieTracker.HandleZoneChanged()
-
-    -- Player coordinates are not settled the instant the event fires, and the route
-    -- target is picked by distance, so give the world a moment before re-picking.
-    C_Timer.After(2, function()
-        AutoRoute.Update()
-    end)
+    -- Location APIs can still report the old zone during the event.
+    -- Keep this retry even if another quest event schedules an earlier update.
+    C_Timer.After(2, AutoRoute.Update)
 end
 
 function _QuestEventHandler:BagUpdate()

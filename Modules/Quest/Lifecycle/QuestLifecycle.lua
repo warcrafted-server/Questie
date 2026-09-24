@@ -17,6 +17,8 @@ local QuestieTracker = QuestieLoader:ImportModule("QuestieTracker")
 local QuestieCombatQueue = QuestieLoader:ImportModule("QuestieCombatQueue")
 ---@type CommsVisibility
 local CommsVisibility = QuestieLoader:ImportModule("CommsVisibility")
+---@type AutoRoute
+local AutoRoute = QuestieLoader:ImportModule("AutoRoute")
 
 --- COMPATIBILITY ---
 local C_Timer = QuestieCompat.C_Timer
@@ -58,6 +60,8 @@ function QuestLifecycle:AcceptQuest(questId)
     local quest = QuestieDB.GetQuest(questId)
 
     if quest then
+        QuestieQuest:ClearLootedSpawns(questId)
+
         local complete = quest:IsComplete()
         -- If any of these flags exist then this quest has already once been accepted and is probably in a failed state
         if (quest.WasComplete or quest.isComplete or complete == 0 or complete == -1) and (QuestiePlayer.currentQuestlog[questId]) then
@@ -117,6 +121,7 @@ function QuestLifecycle:AcceptQuest(questId)
                 -- This needs to happen after QuestieQuest:PopulateQuestLogInfo because that is the place where quest.Objectives is generated
                 Questie:SendMessage("QC_ID_BROADCAST_QUEST_UPDATE", questId)
                 QuestieQuest:PopulateObjectiveNotes(quest)
+                AutoRoute.ScheduleUpdate(0.25)
 
                 -- Run a delayed refresh so newly accepted quests are
                 -- guaranteed visible without manual collapse/expand.
@@ -139,6 +144,8 @@ local hordeChampionMarkerQuests = {[13726] = true, [13727] = true, [13728] = tru
 
 ---@param questId number
 function QuestLifecycle:CompleteQuest(questId)
+    QuestieQuest:ClearLootedSpawns(questId)
+
     -- Skip quests which are turn in only and are not added to the quest log in the first place
     if QuestiePlayer.currentQuestlog[questId] then
         -- Reset quest flags of
@@ -195,6 +202,8 @@ end
 ---@param questId number
 function QuestLifecycle:AbandonQuest(questId)
     if (QuestiePlayer.currentQuestlog[questId]) then
+        QuestieQuest:ClearLootedSpawns(questId)
+
         QuestiePlayer.currentQuestlog[questId] = nil
         CommsVisibility:ScheduleSnapshot("ABANDON_QUEST")
         local questIdsToRemove = {questId}
