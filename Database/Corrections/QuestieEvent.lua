@@ -402,7 +402,7 @@ _AnnounceActiveEvent = function(eventName)
     _QuestieEvent.announcedEvents[eventName] = true
     if not _ShouldAnnounceWorldEvents() then return end
 
-    print(Questie:Colorize("[Questie]", "yellow"), "|cFF6ce314" .. l10n("The \"%s\" world event is active!", l10n(eventName)))
+    Questie:Print("|cFF6ce314" .. l10n("The \"%s\" world event is active!", l10n(eventName)))
 end
 
 _SetTimedEventQuestState = function(eventName, isActive)
@@ -543,9 +543,9 @@ _AnnounceUpcomingTimedEvent = function(eventName, currentDate)
     if _ShouldAnnounceWorldEvents() then
         local hoursUntilStart = math.ceil(delay / 3600)
         if hoursUntilStart > 1 then
-            print(Questie:Colorize("[Questie]", "yellow"), "|cFF6ce314" .. l10n("The \"%s\" world event starts in about %d hours.", l10n(eventName), hoursUntilStart))
+            Questie:Print("|cFF6ce314" .. l10n("The \"%s\" world event starts in about %d hours.", l10n(eventName), hoursUntilStart))
         else
-            print(Questie:Colorize("[Questie]", "yellow"), "|cFF6ce314" .. l10n("The \"%s\" world event starts in less than an hour.", l10n(eventName)))
+            Questie:Print("|cFF6ce314" .. l10n("The \"%s\" world event starts in less than an hour.", l10n(eventName)))
         end
     end
 
@@ -702,17 +702,22 @@ function QuestieEvent:Load(isFinalPass)
         end
     end
 
-    for eventName, eventData in pairs(QuestieEvent.eventDates) do
-        local startDay, startMonth = strsplit("/", eventData.startDate)
-        local endDay, endMonth = strsplit("/", eventData.endDate)
+    if not calendarAvailable then
+        -- The static dates are only a fallback for clients/servers without calendar data.
+        -- When the calendar is available, its absence of an event is authoritative because
+        -- several events (notably Harvest Festival) have dates that vary from year to year.
+        for eventName, eventData in pairs(QuestieEvent.eventDates) do
+            local startDay, startMonth = strsplit("/", eventData.startDate)
+            local endDay, endMonth = strsplit("/", eventData.endDate)
 
-        startDay = tonumber(startDay)
-        startMonth = tonumber(startMonth)
-        endDay = tonumber(endDay)
-        endMonth = tonumber(endMonth)
+            startDay = tonumber(startDay)
+            startMonth = tonumber(startMonth)
+            endDay = tonumber(endDay)
+            endMonth = tonumber(endMonth)
 
-        if (not activeEvents[eventName]) and _WithinDates(startDay, startMonth, endDay, endMonth) and (eventCorrections[eventName] ~= false) then
-            activeEvents[eventName] = true
+            if (not activeEvents[eventName]) and _WithinDates(startDay, startMonth, endDay, endMonth) and (eventCorrections[eventName] ~= false) then
+                activeEvents[eventName] = true
+            end
         end
     end
 
@@ -977,7 +982,7 @@ _LoadDarkmoonFaire = function(eventLocation)
         _QuestieEvent.announcedEvents["Darkmoon Faire"] = true
 
         if _ShouldAnnounceWorldEvents() then
-            print(Questie:Colorize("[Questie]", "yellow"), "|cFF6ce314" .. l10n("The \"%s\" world event is active!", _GetDarkmoonFaireEventName(eventLocation)))
+            Questie:Print("|cFF6ce314" .. l10n("The \"%s\" world event is active!", _GetDarkmoonFaireEventName(eventLocation)))
         end
     end
 
