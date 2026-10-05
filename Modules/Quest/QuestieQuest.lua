@@ -1,6 +1,3 @@
---- COMPATIBILITY ---
-local IsQuestFlaggedCompleted = QuestieCompat.IsQuestFlaggedCompleted or C_QuestLog.IsQuestFlaggedCompleted
-
 ---@class QuestieQuest
 local QuestieQuest = QuestieLoader:CreateModule("QuestieQuest")
 ---@type QuestieQuestPrivate
@@ -72,6 +69,11 @@ local coYield = coroutine.yield
 local coRunning = coroutine.running
 local NewThread = ThreadLib.ThreadSimple
 local OBJECT_SPAWN_HIDE_SECONDS = 120
+
+local function _IsQuestInLog(questId)
+    local index = QuestieCompat.GetQuestLogIndexByID(questId)
+    return index ~= nil and index > 0
+end
 
 local function _UnloadQuestFrames(questId, callback)
     TrackerUtils:ClearTomTomTargetForQuest(questId)
@@ -581,7 +583,9 @@ function QuestieQuest:UpdateQuest(questId)
     ---@type Quest
     local quest = QuestieDB.GetQuest(questId)
 
-    if quest and (not Questie.db.char.complete[questId]) then
+    -- Completion history can outlive a daily reset or server-side reacceptance.
+    -- A quest still in the live log must continue to update its objective icons.
+    if quest and (not Questie.db.char.complete[questId] or _IsQuestInLog(questId)) then
         QuestieQuest:PopulateQuestLogInfo(quest)
 
         local isComplete = quest:IsComplete()
@@ -1058,11 +1062,13 @@ end
 
 ---@param quest Quest
 function QuestieQuest:AddFinisher(quest)
-    --We should never ever add the quest if IsQuestFlaggedComplete true.
     local questId = quest.Id
     Questie.Debug(Questie.DEBUG_INFO, "[QuestieQuest] Adding finisher for quest", questId)
 
-    if (QuestiePlayer.currentQuestlog[questId] and (IsQuestFlaggedCompleted(questId) == false) and (quest:IsComplete() == 1 or quest:IsComplete() == 0) and (not Questie.db.char.complete[questId])) then
+    -- Recheck the live log after asynchronous cleanup. Historical completion
+    -- must not suppress an accepted quest's finisher or revive a removed quest.
+    if QuestiePlayer.currentQuestlog[questId] and _IsQuestInLog(questId)
+        and (quest:IsComplete() == 1 or quest:IsComplete() == 0) then
         local finisher, key
 
         if quest.Finisher ~= nil then
@@ -1236,6 +1242,34 @@ local function _DidObjectObjectiveAdvance(questId, objectiveIndex, collected)
     return previous ~= nil and collected == previous + 1, previous ~= nil and collected < previous
 end
 
+-- Draw preparation and patrol drawing can yield while completion or removal unloads
+-- the quest. Only resume work for the same active objective and spawn cache.
+local function _IsCurrentObjectiveDraw(quest, objective, spawnCache)
+    if objective.Completed or objective.AlreadySpawned ~= spawnCache then
+        return false
+    end
+
+    if objective.IsPartyObjective then
+        return true
+    end
+
+    if QuestiePlayer.currentQuestlog[quest.Id] ~= quest or quest:IsComplete() ~= 0 then
+        return false
+    end
+
+    if quest.Objectives and quest.Objectives[objective.Index] == objective then
+        return true
+    end
+
+    for _, specialObjective in pairs(quest.SpecialObjectives or {}) do
+        if specialObjective == objective then
+            return true
+        end
+    end
+
+    return false
+end
+
 ---@param quest Quest
 ---@param objectiveIndex ObjectiveIndex
 ---@param objective QuestObjective
@@ -1332,7 +1366,12 @@ function QuestieQuest:PopulateObjective(quest, objectiveIndex, objective, blockI
             objectiveCenter = {x = 0, y = 0}
         end
 
+        local spawnCache = objective.AlreadySpawned
         local iconsToDraw, _ = _DetermineIconsToDraw(quest, objective, objectiveIndex, objectiveCenter)
+        if not _IsCurrentObjectiveDraw(quest, objective, spawnCache) then
+            return
+        end
+
         local icon, iconPerZone = _DrawObjectiveIcons(quest.Id, iconsToDraw, objective, maxPerType)
         _DrawObjectiveWaypoints(quest, objective, icon, iconPerZone)
     end
@@ -1575,6 +1614,7 @@ _DetermineIconsToDraw = function(quest, objective, objectiveIndex, objectiveCent
     local iconsToDraw = {}
     local spawnItemId
     local yieldCount = 0
+    local spawnCache = objective.AlreadySpawned
 
     for id, spawnData in pairs(objective.spawnList) do
         if spawnData.ItemId then
@@ -1657,6 +1697,9 @@ _DetermineIconsToDraw = function(quest, objective, objectiveIndex, objectiveCent
                             if yieldCount >= TICKS_PER_YIELD and coRunning() and not objective.IsPartyObjective then
                                 yieldCount = 0
                                 coYield()
+                                if not _IsCurrentObjectiveDraw(quest, objective, spawnCache) then
+                                    return {}, spawnItemId
+                                end
                             end
                         end
                     end
@@ -1853,6 +1896,7 @@ end
 _DrawObjectiveWaypoints = function(quest, objective, icon, iconPerZone)
     local yieldCount = 0
     local hostileRouteCountPerZone = {}
+    local spawnCache = objective.AlreadySpawned
 
     -- A single moving target has one useful patrol line. Multiple independent
     -- hostile routes describe a population and are better represented by icons.
@@ -1867,6 +1911,10 @@ _DrawObjectiveWaypoints = function(quest, objective, icon, iconPerZone)
     for _, spawnData in pairs(objective.spawnList) do -- spawnData.Name, spawnData.Spawns
         if spawnData.Waypoints and not _HasEarlierObjectiveForNPC(quest, objective, spawnData.Id) then
             for zone, waypoints in pairs(spawnData.Waypoints) do
+                if not _IsCurrentObjectiveDraw(quest, objective, spawnCache) then
+                    return
+                end
+
                 local showWaypoints = (not spawnData.Hostile) or hostileRouteCountPerZone[zone] == 1
                 if showWaypoints and _HasVisibleSpawnInZone(spawnData.Spawns[zone]) then
                     local firstWaypoint = waypoints[1][1]
