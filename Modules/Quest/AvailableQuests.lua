@@ -21,6 +21,8 @@ local QuestieQuestBlacklist = QuestieLoader:ImportModule("QuestieQuestBlacklist"
 local IsleOfQuelDanas = QuestieLoader:ImportModule("IsleOfQuelDanas")
 ---@type QuestieLib
 local QuestieLib = QuestieLoader:ImportModule("QuestieLib")
+---@type QuestieEvent
+local QuestieEvent = QuestieLoader:ImportModule("QuestieEvent")
 ---@type DailyQuestComms
 local DailyQuestComms = QuestieLoader:ImportModule("DailyQuestComms")
 ---@type QuestieServer
@@ -40,11 +42,13 @@ local time = time
 local date = date
 local tonumber = tonumber
 local coRunning = coroutine.running
+local getProfilerTime = QuestieLoader.GetProfilerTime
 
 ---@param onComplete function?
-local function _UnloadQuestFrames(questId, iconType, noteType, onComplete)
+---@param yieldRefresh (fun(forceYield: boolean?): boolean)?
+local function _UnloadQuestFrames(questId, iconType, noteType, onComplete, yieldRefresh)
     if coRunning() then
-        QuestieMap:UnloadQuestFrames(questId, iconType, noteType)
+        QuestieMap:UnloadQuestFrames(questId, iconType, noteType, yieldRefresh)
         if onComplete then
             onComplete()
         end
@@ -63,8 +67,23 @@ local QUESTS_PER_YIELD = 24
 local QUESTS_PER_YIELD_FAST = 512
 -- Drawing is substantially more expensive than checking availability, so use a smaller normal batch.
 local AVAILABLE_QUEST_DRAWS_PER_YIELD = 4
+local AVAILABLE_QUEST_SLICE_SECONDS = 0.003
 local questsPerYield = QUESTS_PER_YIELD
 local isFastRefreshActive = false
+
+-- Share one deadline across the scan and display passes, including nested frame
+-- removal. Reset after resuming so suspended scheduler time is never charged.
+local function _CreateRefreshYield()
+    local deadline = getProfilerTime and (getProfilerTime() + AVAILABLE_QUEST_SLICE_SECONDS)
+    return function(forceYield)
+        if forceYield or (deadline and getProfilerTime() >= deadline) then
+            yield()
+            deadline = getProfilerTime and (getProfilerTime() + AVAILABLE_QUEST_SLICE_SECONDS)
+            return true
+        end
+        return false
+    end
+end
 
 --- Used to keep track of the active timer for CalculateAndDrawAll
 ---@type Ticker|nil
@@ -80,7 +99,9 @@ local availableQuestStartTooltipsDirty = true
 local availableQuests = {}
 local nextAvailableQuests = {}
 local availableQuestsByNpc = {}
+---@type table<string, table<QuestId, boolean>>
 local levelRequirementCache = {}
+local repeatableQuestCache = {}
 local dirtySpawnVisibility = {}
 
 ---@type string|nil
@@ -389,19 +410,37 @@ end
 
 local _CalculateAvailableQuests, _DrawChildQuests, _AddStarter, _DrawAvailableQuest, _GetQuestIcon, _GetIconScaleForAvailable, _HasProperDistanceToAlreadyAddedSpawns, _RegisterQuestStartTooltips, _GetStructuredAvailableQuestsInGossip, _GetStructuredActiveQuestsInGossip, _RemoveQuestFromNpcAvailability, _SyncAvailableQuestDisplay, _HasLiveAvailableQuestFrames
 
+-- A scan selects its level range once, then uses numeric quest IDs on cache hits.
+local function _GetLevelRequirementCache(minLevel, maxLevel, playerLevel)
+    local cacheKey = minLevel .. ":" .. maxLevel .. ":" .. playerLevel .. ":" .. Questie.db.profile.lowLevelStyle
+    local cache = levelRequirementCache[cacheKey]
+    if not cache then
+        cache = {}
+        levelRequirementCache[cacheKey] = cache
+    end
+    return cache
+end
+
 ---@param questId QuestId
 ---@param minLevel Level
 ---@param maxLevel Level
 ---@param playerLevel Level?
 ---@return boolean
 function AvailableQuests.IsLevelRequirementsFulfilled(questId, minLevel, maxLevel, playerLevel)
-    local cacheKey = questId .. ":" .. minLevel .. ":" .. maxLevel .. ":" .. (playerLevel or 0)
-    if levelRequirementCache[cacheKey] ~= nil then
-        return levelRequirementCache[cacheKey]
+    playerLevel = playerLevel or QuestiePlayer.GetPlayerLevel()
+    local cache = _GetLevelRequirementCache(minLevel, maxLevel, playerLevel)
+    local isActiveEvent = QuestieEvent.activeQuests and QuestieEvent.activeQuests[questId]
+    if not isActiveEvent and cache[questId] ~= nil then
+        return cache[questId]
     end
 
     local isFulfilled = QuestieDB.IsLevelRequirementsFulfilled(questId, minLevel, maxLevel, playerLevel)
-    levelRequirementCache[cacheKey] = isFulfilled
+    -- Parent-log and active-event overrides are live decisions, not static level
+    -- results. Never retain them when a quest/event changes between resumes.
+    if not isActiveEvent then
+        local parentQuestId = QuestieDB.QueryQuestSingle(questId, "parentQuest")
+        if not parentQuestId or parentQuestId == 0 then cache[questId] = isFulfilled end
+    end
     return isFulfilled
 end
 
@@ -442,12 +481,21 @@ end
 AvailableQuests.InvalidateWintergraspSpawnVisibility = AvailableQuests.InvalidateSpawnVisibility
 
 -- Repeatable quests should be controlled by showRepeatableQuests
-local function _IsLevelRequirementsFulfilledForAvailable(questId, minLevel, maxLevel, playerLevel, isRepeatableQuest)
-    if AvailableQuests.IsLevelRequirementsFulfilled(questId, minLevel, maxLevel, playerLevel) then
+local function _IsLevelRequirementsFulfilledForAvailable(questId, minLevel, maxLevel, playerLevel, isRepeatableQuest, levelCache, repeatableLevelCache)
+    local isActiveEvent = QuestieEvent.activeQuests and QuestieEvent.activeQuests[questId]
+    local isFulfilled
+    if levelCache and not isActiveEvent then isFulfilled = levelCache[questId] end
+    if isFulfilled == nil then
+        isFulfilled = AvailableQuests.IsLevelRequirementsFulfilled(questId, minLevel, maxLevel, playerLevel)
+    end
+    if isFulfilled then
         return true
     end
 
     if isRepeatableQuest and Questie.db.profile.lowLevelStyle ~= Questie.LOWLEVEL_RANGE then
+        if repeatableLevelCache and not isActiveEvent and repeatableLevelCache[questId] ~= nil then
+            return repeatableLevelCache[questId]
+        end
         return AvailableQuests.IsLevelRequirementsFulfilled(questId, 1, maxLevel, playerLevel)
     end
 
@@ -729,11 +777,12 @@ _RemoveQuestFromNpcAvailability = function(questId, quest)
 end
 
 ---@param questId QuestId
-function AvailableQuests.RemoveAvailableQuest(questId)
+---@param yieldRefresh (fun(forceYield: boolean?): boolean)? Optional shared refresh budget.
+function AvailableQuests.RemoveAvailableQuest(questId, yieldRefresh)
     dirtySpawnVisibility[questId] = nil
     availableQuests[questId] = nil
     _RemoveQuestFromNpcAvailability(questId, QuestieDB.GetQuest(questId))
-    _UnloadQuestFrames(questId, nil, "available")
+    _UnloadQuestFrames(questId, nil, "available", nil, yieldRefresh)
     QuestieTooltips:RemoveAvailableQuest(questId)
 end
 
@@ -1127,6 +1176,7 @@ end
 
 _CalculateAvailableQuests = function()
     local maxQuestsPerYield = questsPerYield
+    local yieldRefresh = _CreateRefreshYield()
     local unavailableQuests = _GetEffectiveUnavailableQuests()
     local previousAvailableQuests = availableQuests
     availableQuests = nextAvailableQuests
@@ -1171,12 +1221,17 @@ _CalculateAvailableQuests = function()
     local sunsReachQuests = QuestieQuestBlacklist.SunsReachQuests
 
     QuestieDB.activeChildQuests = {} -- Reset here so we don't need to keep track in the quest event system
+    local questLogQuestIds
+    local levelCache, repeatableLevelCache
+
+    local function _SelectLevelCaches()
+        levelCache = _GetLevelRequirementCache(minLevel, maxLevel, playerLevel)
+        repeatableLevelCache = _GetLevelRequirementCache(1, maxLevel, playerLevel)
+    end
 
     -- We create a local function here to improve readability but use the localized variables above.
     -- The order of checks is important here to bring the speed to a max
     local function _CheckAvailability(questId)
-        local isRepeatableQuest = QuestieDB.IsRepeatable(questId)
-
         if (autoBlacklist[questId] or -- Don't show autoBlacklist quests marked as such by IsDoable
             completedQuests[questId] or -- Don't show completed quests
             hiddenQuests[questId] or -- Don't show blacklisted quests
@@ -1194,6 +1249,12 @@ _CalculateAvailableQuests = function()
                 nextAvailableQuestSet[questId] = nil
                 return
             end
+        end
+
+        local isRepeatableQuest = repeatableQuestCache[questId]
+        if isRepeatableQuest == nil then
+            isRepeatableQuest = QuestieDB.IsRepeatable(questId)
+            repeatableQuestCache[questId] = isRepeatableQuest
         end
 
         if (
@@ -1215,12 +1276,16 @@ _CalculateAvailableQuests = function()
             return
         end
 
-        if (
-            (not _IsLevelRequirementsFulfilledForAvailable(questId, minLevel, maxLevel, playerLevel, isRepeatableQuest)) or
-            (not QuestieDB.IsDoable(questId, debugEnabled, true))
-        ) then
+        if not _IsLevelRequirementsFulfilledForAvailable(questId, minLevel, maxLevel, playerLevel, isRepeatableQuest, levelCache, repeatableLevelCache) then
             --If the quests are not within level range we want to unload them
             --(This is for when people level up or change settings etc)
+            nextAvailableQuestSet[questId] = nil
+            return
+        end
+
+        -- Build lazily: batches containing only filtered quests need no log scan.
+        questLogQuestIds = questLogQuestIds or QuestieCompat.GetQuestLogQuestIds()
+        if not QuestieDB.IsDoable(questId, debugEnabled, true, questLogQuestIds) then
             nextAvailableQuestSet[questId] = nil
             return
         end
@@ -1228,33 +1293,35 @@ _CalculateAvailableQuests = function()
         nextAvailableQuestSet[questId] = true
     end
 
+    yieldRefresh() -- Include setup work in the first slice.
+    _SelectLevelCaches()
     local questCount = 0
     for questId in pairs(questData) do
         _CheckAvailability(questId)
 
         -- Reset the questCount
         questCount = questCount + 1
-        if questCount > maxQuestsPerYield then
+        if yieldRefresh(questCount > maxQuestsPerYield) then
             questCount = 0
-            yield()
+            questLogQuestIds = nil -- The next check must reread changes made while suspended.
+            _SelectLevelCaches() -- A level/settings event may have reset the cache while suspended.
         end
     end
 
-    _SyncAvailableQuestDisplay(previousAvailableQuests, availableQuests, maxQuestsPerYield)
+    _SyncAvailableQuestDisplay(previousAvailableQuests, availableQuests, maxQuestsPerYield, yieldRefresh)
 end
 
-_SyncAvailableQuestDisplay = function(previousAvailableQuests, nextAvailableQuests, maxQuestsPerYield)
+_SyncAvailableQuestDisplay = function(previousAvailableQuests, nextAvailableQuests, maxQuestsPerYield, yieldRefresh)
     local questCount = 0
 
     for questId in pairs(previousAvailableQuests) do
         if not nextAvailableQuests[questId] then
-            AvailableQuests.RemoveAvailableQuest(questId)
+            AvailableQuests.RemoveAvailableQuest(questId, yieldRefresh)
         end
 
         questCount = questCount + 1
-        if questCount > maxQuestsPerYield then
+        if yieldRefresh(questCount > maxQuestsPerYield) then
             questCount = 0
-            yield()
         end
     end
 
@@ -1266,7 +1333,7 @@ _SyncAvailableQuestDisplay = function(previousAvailableQuests, nextAvailableQues
         if replaceSpawns then
             -- Consume before yielding so another visibility change stays dirty.
             dirtySpawnVisibility[questId] = nil
-            _UnloadQuestFrames(questId, nil, "available")
+            _UnloadQuestFrames(questId, nil, "available", nil, yieldRefresh)
             QuestieTooltips:RemoveAvailableQuest(questId)
         end
         local hasLiveFrames = _HasLiveAvailableQuestFrames(questId)
@@ -1278,11 +1345,9 @@ _SyncAvailableQuestDisplay = function(previousAvailableQuests, nextAvailableQues
         end
 
         questCount = questCount + 1
-        if questCount > maxQuestsPerYield or ((not isFastRefreshActive) and drawCount >= AVAILABLE_QUEST_DRAWS_PER_YIELD)
-        then
+        if yieldRefresh(questCount > maxQuestsPerYield or ((not isFastRefreshActive) and drawCount >= AVAILABLE_QUEST_DRAWS_PER_YIELD)) then
             questCount = 0
             drawCount = 0
-            yield()
         end
     end
 
